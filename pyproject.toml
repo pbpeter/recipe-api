@@ -1,5 +1,5 @@
 [project]
-name = "recipes-api"
+name = "recipe-api"
 version = "0.1.0"
 description = ""
 
