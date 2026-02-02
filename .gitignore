@@ -1,0 +1,55 @@
+# Byte-compiled Python files
+*.pyc
+*.pyo
+__pycache__/
+
+# Virtual environment
+venv/
+env/
+
+.env
+
+# Django specific
+*.log
+*.pot
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+# Local settings
+local_settings.py
+
+# Test coverage
+.coverage
+*.cover
+htmlcov/
+
+# Pytest
+.pytest_cache/
+
+# IDE-specific files
+.idea/
+.vscode/
+*.iml
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+*.orig
+
+# Build files
+*.egg-info/
+dist/
+build/
+
+# Pipenv
+Pipfile.lock
+
+# Poetry
+poetry.lock
