@@ -53,4 +53,5 @@ Pipfile.lock
 
 # Poetry
 poetry.lock
+/.idea/
 /.venv/
