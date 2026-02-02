@@ -53,3 +53,4 @@ Pipfile.lock
 
 # Poetry
 poetry.lock
+/.idea/
