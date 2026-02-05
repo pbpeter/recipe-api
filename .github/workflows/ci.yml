@@ -49,7 +49,7 @@ jobs:
 
       - name: Review agent
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # TODO - GITHUB_TOKEN create in GitHub secrets, but is not allowed to start with GITHUB_
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
