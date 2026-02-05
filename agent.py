@@ -1,9 +1,10 @@
 import os
+import re
 import sys
 import json
 import asyncio
 from typing import Any, Dict, List
-
+import weakref
 import dotenv
 from github import Github, Auth, GithubException
 
@@ -11,6 +12,27 @@ from llama_index.llms.openai import OpenAI
 from llama_index.core.tools import FunctionTool
 from llama_index.core.agent.workflow import FunctionAgent, AgentWorkflow, AgentOutput, ToolCall, ToolCallResult
 from llama_index.core.workflow import Context
+
+_STATE_BY_CTX: "weakref.WeakKeyDictionary[object, Dict[str, Any]]" = weakref.WeakKeyDictionary()
+
+def _ensure_state_for_ctx(ctx: object) -> Dict[str, Any]:
+    # ctx ist nicht weakref-bar (z.B. dict) -> fallback auf globalen State
+    try:
+        weakref.ref(ctx)
+    except TypeError:
+        return _STATE_GLOBAL
+
+    state = _STATE_BY_CTX.get(ctx)
+    if state is None:
+        state = {
+            "repository": "",
+            "pr_number": None,
+            "gathered_contexts": "",
+            "review_comment": "",
+            "final_review_comment": "",
+        }
+        _STATE_BY_CTX[ctx] = state
+    return state
 
 
 # ----------------------------
@@ -33,6 +55,21 @@ def normalize_repository(v: str | None) -> str:
     if not v:
         raise ValueError("REPOSITORY is missing (expected 'owner/repo')")
     return v.strip()
+
+def normalize_repo(repo: str) -> str:
+    repo = repo.strip()
+
+    # full URL -> owner/repo
+    m = re.search(r"github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?$", repo)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+
+    # owner/repo(.git) -> owner/repo
+    if re.match(r"^[^/]+/[^/]+(\.git)?$", repo):
+        return repo[:-4] if repo.endswith(".git") else repo
+
+    raise ValueError(f"Invalid repository format: {repo}")
+
 
 
 # ----------------------------
@@ -124,55 +161,105 @@ def post_review_or_comment(gh: Github, full_repo_name: str, pr_number: int, comm
 # ----------------------------
 # In-memory state (simple dict)
 # ----------------------------
-_STATE: Dict[str, Any] = {
-    "pr_number": None,
+_STATE_GLOBAL: Dict[str, Any] = {
     "repository": "",
+    "pr_number": None,
     "gathered_contexts": "",
     "review_comment": "",
     "final_review_comment": "",
 }
 
+async def init_state(ctx: Context) -> None:
+    repo_env = os.getenv("REPOSITORY", "").strip()
+    pr_env = os.getenv("PR_NUMBER", "").strip()
 
-async def get_state(_: Context) -> Dict[str, Any]:
-    return _STATE
+    print(f"ENV REPOSITORY={repo_env!r}")
+    print(f"ENV PR_NUMBER={pr_env!r}")
+
+    if not repo_env or not pr_env:
+        raise RuntimeError("Missing REPOSITORY or PR_NUMBER env vars")
+
+    state = {
+        "repository": normalize_repo(repo_env),  # owner/repo
+        "pr_number": int(pr_env),
+        "gathered_contexts": "",
+        "review_comment": "",
+        "final_review_comment": "",
+    }
+
+    await ctx.set("state", state)
+    # Extra Debug:
+    print("Initialized state:", json.dumps(state, sort_keys=True))
 
 
-async def set_pr_number_in_state(_: Context, pr_number: int) -> str:
-    _STATE["pr_number"] = pr_number
+async def get_state(ctx) -> dict:
+    state = _ensure_state_for_ctx(ctx)
+
+    # einmalig aus ENV “seeden”, falls leer
+    if not state["repository"]:
+        repo_env = os.getenv("REPOSITORY", "").strip()
+        if repo_env:
+            state["repository"] = normalize_repo(repo_env)
+
+    if state["pr_number"] is None:
+        pr_env = os.getenv("PR_NUMBER", "").strip()
+        if pr_env:
+            state["pr_number"] = int(pr_env)
+
+    return state
+
+async def set_pr_number_in_state(ctx, pr_number: int) -> str:
+    state = _ensure_state_for_ctx(ctx)
+    state["pr_number"] = int(pr_number)
     return "Saved pr_number to state."
 
 
-async def set_repository_in_state(_: Context, repository: str) -> str:
-    _STATE["repository"] = repository
+async def set_repository_in_state(ctx, repository: str) -> str:
+    state = _ensure_state_for_ctx(ctx)
+    state["repository"] = normalize_repo(repository)
     return "Saved repository to state."
 
 
-async def add_context_to_state(_: Context, gathered_contexts: str) -> str:
-    _STATE["gathered_contexts"] = gathered_contexts
+async def add_context_to_state(ctx, gathered_contexts: str) -> str:
+    state = _ensure_state_for_ctx(ctx)
+    state["gathered_contexts"] = gathered_contexts
     return "Saved gathered_contexts to state."
 
 
-async def add_review_comment_to_state(_: Context, review_comment: str) -> str:
-    _STATE["review_comment"] = review_comment
+async def add_review_comment_to_state(ctx, review_comment: str) -> str:
+    state = _ensure_state_for_ctx(ctx)
+    state["review_comment"] = review_comment
     return "Saved review_comment to state."
 
 
-async def add_final_review_to_state(_: Context, final_review_comment: str) -> str:
-    _STATE["final_review_comment"] = final_review_comment
+async def add_final_review_to_state(ctx, final_review_comment: str) -> str:
+    state = _ensure_state_for_ctx(ctx)
+    state["final_review_comment"] = final_review_comment
     return "Saved final_review_comment to state."
 
 
 # ----------------------------
 # Tools that use GH client
 # ----------------------------
-def tool_get_pr_details() -> Dict[str, Any]:
-    gh = build_github_client(getenv("GITHUB_TOKEN"))
-    repo = normalize_repository(getenv("REPOSITORY"))
-    pr_number = normalize_pr_number(getenv("PR_NUMBER"))
-    return get_pr_details(gh, repo, pr_number)
+async def tool_get_pr_details(ctx: Context) -> dict:
+    state = await get_state(ctx)
+    repo_full = state["repository"]          # pbpeter/recipe-api
+    pr_number = int(state["pr_number"])
+    git = build_github_client(getenv("GITHUB_TOKEN"))
+    repo = git.get_repo(repo_full)
+    pr = repo.get_pull(pr_number)
+
+    return {
+        "author": pr.user.login if pr.user else "",
+        "title": pr.title or "",
+        "body": pr.body or "",               # nie None
+        "diff_url": pr.diff_url,
+        "state": pr.state,
+        "commits": [c.sha for c in pr.get_commits()],
+    }
 
 
-def tool_get_pr_files() -> List[Dict[str, Any]]:
+async def tool_get_pr_files() -> List[Dict[str, Any]]:
     gh = build_github_client(getenv("GITHUB_TOKEN"))
     repo = normalize_repository(getenv("REPOSITORY"))
     pr_number = normalize_pr_number(getenv("PR_NUMBER"))
@@ -292,7 +379,7 @@ def main_workflow() -> AgentWorkflow:
     workflow = AgentWorkflow(
         agents=[context_agent, commentor_agent, review_agent],
         root_agent=review_agent.name,
-        initial_state=_STATE,
+        initial_state=_STATE_GLOBAL,
     )
     return workflow
 
@@ -315,17 +402,27 @@ async def run():
     if len(argv) >= 5 and not getenv("OPENAI_BASE_URL"):
         os.environ["OPENAI_BASE_URL"] = argv[4]
 
-    repository = normalize_repository(getenv("REPOSITORY"))
-    pr_number = normalize_pr_number(getenv("PR_NUMBER"))
+    repo_env = os.getenv("REPOSITORY", "").strip()
+    pr_env = os.getenv("PR_NUMBER", "").strip()
+
+    repository = normalize_repo(repo_env)
+    pr_number = int(pr_env)
 
     # set in state for completeness (not strictly needed, but useful)
-    _STATE["repository"] = repository
-    _STATE["pr_number"] = pr_number
+    _STATE_GLOBAL["repository"] = repository
+    _STATE_GLOBAL["pr_number"] = pr_number
 
     query = f"Write a review for PR number {pr_number}."
 
     workflow = main_workflow()
     ctx = Context(workflow)
+
+    state = _ensure_state_for_ctx(ctx)
+    state["repository"] = repository
+    state["pr_number"] = pr_number
+
+    print("Repo:", state["repository"], "PR:", state["pr_number"])
+
     handler = workflow.run(query, ctx=ctx)
 
     current_agent = None
